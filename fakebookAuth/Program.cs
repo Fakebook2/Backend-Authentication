@@ -1,5 +1,4 @@
 using Dapper;
-using HotChocolate.Types;
 using Npgsql;
 
 namespace fakebookAuth;
@@ -39,6 +38,12 @@ public static class Program
             .ValidateOnStart();
 
         builder.Services
+            .AddOptions<SmtpOptions>()
+            .Bind(builder.Configuration.GetSection(SmtpOptions.SectionName))
+            .Validate(options => !options.Enabled || options.IsConfigured, "SMTP must be fully configured when Smtp:Enabled is true.")
+            .ValidateOnStart();
+
+        builder.Services
             .AddOptions<SnowflakeOptions>()
             .Bind(builder.Configuration.GetSection(SnowflakeOptions.SectionName))
             .Validate(options => options.WorkerId is >= 0 and <= 1023, "Snowflake:WorkerId must be between 0 and 1023.")
@@ -50,6 +55,7 @@ public static class Program
         builder.Services.AddSingleton<ISnowflakeIdGenerator, SnowflakeIdGenerator>();
         builder.Services.AddSingleton<IPasswordHasher, BCryptPasswordHasher>();
         builder.Services.AddSingleton<ITokenService, TokenService>();
+        builder.Services.AddSingleton<IEmailSender, SmtpEmailSender>();
 
         builder.Services.AddScoped<IUserRepository, UserRepository>();
         builder.Services.AddScoped<ICredentialRepository, CredentialRepository>();

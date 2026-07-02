@@ -6,6 +6,7 @@ namespace fakebookAuth;
 public interface IAuthService
 {
     Task<RegisterPayload> RegisterAsync(RegisterInput input, CancellationToken cancellationToken);
+    Task<VerifyEmailPayload> VerifyEmailAsync(VerifyEmailInput input, CancellationToken cancellationToken);
     Task<LoginPayload> LoginAsync(LoginInput input, CancellationToken cancellationToken);
 }
 
@@ -18,11 +19,14 @@ public sealed class AuthService(
     IAuditLogRepository auditLogs,
     IPasswordHasher passwordHasher,
     ITokenService tokenService,
+    IEmailSender emailSender,
     ISnowflakeIdGenerator ids,
     IHttpContextAccessor httpContextAccessor,
-    Microsoft.Extensions.Options.IOptions<AuthOptions> authOptions) : IAuthService
+    Microsoft.Extensions.Options.IOptions<AuthOptions> authOptions,
+    Microsoft.Extensions.Options.IOptions<SmtpOptions> smtpOptions) : IAuthService
 {
     private readonly AuthOptions _authOptions = authOptions.Value;
+    private readonly SmtpOptions _smtpOptions = smtpOptions.Value;
 
     public async Task<RegisterPayload> RegisterAsync(RegisterInput input, CancellationToken cancellationToken)
     {
@@ -78,7 +82,18 @@ public sealed class AuthService(
 
             await transaction.CommitAsync(cancellationToken);
 
-            return new RegisterPayload(true, "Registration successful. Please verify your email before signing in.");
+            if (_smtpOptions.Enabled)
+            {
+                await emailSender.SendVerificationOtpAsync(
+                    register.Email,
+                    register.DisplayName,
+                    otp,
+                    cancellationToken);
+
+                return new RegisterPayload(true, "Registration successful. Please check your email for the verification code.");
+            }
+
+            return new RegisterPayload(true, "Registration successful. Email delivery is disabled; verify manually before signing in.");
         }
         catch (GraphQLException)
         {
@@ -89,6 +104,65 @@ public sealed class AuthService(
         {
             await RollbackQuietlyAsync(transaction, cancellationToken);
             throw GraphQlError("Email or username already exists.", "IDENTIFIER_EXISTS");
+        }
+        catch
+        {
+            await RollbackQuietlyAsync(transaction, cancellationToken);
+            throw;
+        }
+    }
+
+    public async Task<VerifyEmailPayload> VerifyEmailAsync(VerifyEmailInput input, CancellationToken cancellationToken)
+    {
+        var identifier = NormalizeIdentifier(input.Identifier);
+        var otp = NormalizeOtp(input.Otp);
+
+        await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+
+        try
+        {
+            var user = await users.FindByIdentifierAsync(connection, transaction, identifier, cancellationToken);
+            if (user is null)
+            {
+                throw GraphQlError("Verification code is invalid or expired.", "INVALID_OR_EXPIRED_VERIFICATION_CODE");
+            }
+
+            if (user.Status == AuthConstants.StatusActive)
+            {
+                await transaction.CommitAsync(cancellationToken);
+                return new VerifyEmailPayload(true, "Email is already verified.");
+            }
+
+            if (user.Status is AuthConstants.StatusDisabled or AuthConstants.StatusDeleted)
+            {
+                throw GraphQlError("This account has been disabled or deleted.", "ACCOUNT_UNAVAILABLE");
+            }
+
+            var verificationId = await verifications.FindValidEmailVerificationIdAsync(
+                connection,
+                transaction,
+                user.UserId,
+                TokenHashing.Sha256Hex(otp),
+                DateTimeOffset.UtcNow,
+                cancellationToken);
+
+            if (verificationId is null)
+            {
+                throw GraphQlError("Verification code is invalid or expired.", "INVALID_OR_EXPIRED_VERIFICATION_CODE");
+            }
+
+            await users.ActivateAsync(connection, transaction, user.UserId, cancellationToken);
+            await verifications.MarkUsedAsync(connection, transaction, verificationId.Value, cancellationToken);
+
+            await transaction.CommitAsync(cancellationToken);
+
+            return new VerifyEmailPayload(true, "Email verified successfully.");
+        }
+        catch (GraphQLException)
+        {
+            await RollbackQuietlyAsync(transaction, cancellationToken);
+            throw;
         }
         catch
         {
@@ -209,6 +283,17 @@ public sealed class AuthService(
     }
 
     private static string NormalizeIdentifier(string value) => value.Trim().ToLowerInvariant();
+
+    private static string NormalizeOtp(string value)
+    {
+        var otp = value.Trim();
+        if (otp.Length != 6 || otp.Any(character => !char.IsDigit(character)))
+        {
+            throw GraphQlError("Verification code must be 6 digits.", "INVALID_VERIFICATION_CODE");
+        }
+
+        return otp;
+    }
 
     private static async Task RollbackQuietlyAsync(
         System.Data.Common.DbTransaction transaction,

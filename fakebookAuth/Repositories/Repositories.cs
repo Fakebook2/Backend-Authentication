@@ -21,6 +21,18 @@ public interface IUserRepository
         CancellationToken cancellationToken);
 
     Task<IdentityUser?> FindByIdentifierAsync(string identifier, CancellationToken cancellationToken);
+
+    Task<IdentityUser?> FindByIdentifierAsync(
+        DbConnection connection,
+        DbTransaction transaction,
+        string identifier,
+        CancellationToken cancellationToken);
+
+    Task ActivateAsync(
+        DbConnection connection,
+        DbTransaction transaction,
+        long userId,
+        CancellationToken cancellationToken);
 }
 
 public sealed class UserRepository(NpgsqlDataSource dataSource) : IUserRepository
@@ -77,25 +89,22 @@ public sealed class UserRepository(NpgsqlDataSource dataSource) : IUserRepositor
 
     public async Task<IdentityUser?> FindByIdentifierAsync(string identifier, CancellationToken cancellationToken)
     {
-        const string sql = """
-            SELECT
-                user_id AS UserId,
-                email AS Email,
-                phone AS Phone,
-                username AS Username,
-                dob AS Dob,
-                display_name AS DisplayName,
-                status AS Status,
-                created_at AS CreatedAt,
-                updated_at AS UpdatedAt
-            FROM fb.id_user
-            WHERE lower(email) = lower(@Identifier)
-               OR lower(username) = lower(@Identifier)
-            LIMIT 1;
-            """;
-
         await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
-        var command = new CommandDefinition(sql, new { Identifier = identifier }, cancellationToken: cancellationToken);
+        return await FindByIdentifierAsync(connection, transaction: null!, identifier, cancellationToken);
+    }
+
+    public async Task<IdentityUser?> FindByIdentifierAsync(
+        DbConnection connection,
+        DbTransaction transaction,
+        string identifier,
+        CancellationToken cancellationToken)
+    {
+        var command = new CommandDefinition(
+            SelectByIdentifierSql,
+            new { Identifier = identifier },
+            transaction,
+            cancellationToken: cancellationToken);
+
         var user = await connection.QuerySingleOrDefaultAsync<IdentityUserRow>(command);
 
         return user is null
@@ -106,7 +115,7 @@ public sealed class UserRepository(NpgsqlDataSource dataSource) : IUserRepositor
                 Email = user.Email,
                 Phone = user.Phone,
                 Username = user.Username,
-                Dob = user.Dob is null ? null : DateOnly.FromDateTime(user.Dob.Value),
+                Dob = user.Dob,
                 DisplayName = user.DisplayName,
                 Status = user.Status,
                 CreatedAt = user.CreatedAt,
@@ -114,13 +123,52 @@ public sealed class UserRepository(NpgsqlDataSource dataSource) : IUserRepositor
             };
     }
 
+    public async Task ActivateAsync(
+        DbConnection connection,
+        DbTransaction transaction,
+        long userId,
+        CancellationToken cancellationToken)
+    {
+        const string sql = """
+            UPDATE fb.id_user
+            SET status = @Status,
+                updated_at = now()
+            WHERE user_id = @UserId;
+            """;
+
+        var command = new CommandDefinition(
+            sql,
+            new { UserId = userId, Status = AuthConstants.StatusActive },
+            transaction,
+            cancellationToken: cancellationToken);
+
+        await connection.ExecuteAsync(command);
+    }
+
+    private const string SelectByIdentifierSql = """
+        SELECT
+            user_id AS UserId,
+            email AS Email,
+            phone AS Phone,
+            username AS Username,
+            dob AS Dob,
+            display_name AS DisplayName,
+            status AS Status,
+            created_at AS CreatedAt,
+            updated_at AS UpdatedAt
+        FROM fb.id_user
+        WHERE lower(email) = lower(@Identifier)
+           OR lower(username) = lower(@Identifier)
+        LIMIT 1;
+        """;
+
     private sealed class IdentityUserRow
     {
         public long UserId { get; set; }
         public string Email { get; set; } = string.Empty;
         public string? Phone { get; set; }
         public string Username { get; set; } = string.Empty;
-        public DateTime? Dob { get; set; }
+        public DateOnly? Dob { get; set; }
         public string DisplayName { get; set; } = string.Empty;
         public short Status { get; set; }
         public DateTimeOffset CreatedAt { get; set; }
@@ -227,6 +275,20 @@ public interface IVerificationRepository
         string tokenHash,
         DateTimeOffset expiresAt,
         CancellationToken cancellationToken);
+
+    Task<long?> FindValidEmailVerificationIdAsync(
+        DbConnection connection,
+        DbTransaction transaction,
+        long userId,
+        string tokenHash,
+        DateTimeOffset now,
+        CancellationToken cancellationToken);
+
+    Task MarkUsedAsync(
+        DbConnection connection,
+        DbTransaction transaction,
+        long verificationId,
+        CancellationToken cancellationToken);
 }
 
 public sealed class VerificationRepository : IVerificationRepository
@@ -255,6 +317,54 @@ public sealed class VerificationRepository : IVerificationRepository
         };
 
         var command = new CommandDefinition(sql, parameters, transaction, cancellationToken: cancellationToken);
+        await connection.ExecuteAsync(command);
+    }
+
+    public async Task<long?> FindValidEmailVerificationIdAsync(
+        DbConnection connection,
+        DbTransaction transaction,
+        long userId,
+        string tokenHash,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        const string sql = """
+            SELECT verification_id
+            FROM fb.id_verification
+            WHERE user_id = @UserId
+              AND type = @Type
+              AND token_hash = @TokenHash
+              AND is_used = false
+              AND expires_at > @Now
+            ORDER BY created_at DESC
+            LIMIT 1;
+            """;
+
+        var parameters = new
+        {
+            UserId = userId,
+            Type = AuthConstants.EmailVerificationType,
+            TokenHash = tokenHash,
+            Now = now
+        };
+
+        var command = new CommandDefinition(sql, parameters, transaction, cancellationToken: cancellationToken);
+        return await connection.ExecuteScalarAsync<long?>(command);
+    }
+
+    public async Task MarkUsedAsync(
+        DbConnection connection,
+        DbTransaction transaction,
+        long verificationId,
+        CancellationToken cancellationToken)
+    {
+        const string sql = """
+            UPDATE fb.id_verification
+            SET is_used = true
+            WHERE verification_id = @VerificationId;
+            """;
+
+        var command = new CommandDefinition(sql, new { VerificationId = verificationId }, transaction, cancellationToken: cancellationToken);
         await connection.ExecuteAsync(command);
     }
 }
