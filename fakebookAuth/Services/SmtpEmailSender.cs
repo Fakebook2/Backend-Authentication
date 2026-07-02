@@ -11,6 +11,12 @@ public interface IEmailSender
         string displayName,
         string otp,
         CancellationToken cancellationToken);
+
+    Task SendPasswordResetOtpAsync(
+        string email,
+        string displayName,
+        string otp,
+        CancellationToken cancellationToken);
 }
 
 public sealed class SmtpEmailSender(IOptions<SmtpOptions> options) : IEmailSender
@@ -23,6 +29,35 @@ public sealed class SmtpEmailSender(IOptions<SmtpOptions> options) : IEmailSende
         string otp,
         CancellationToken cancellationToken)
     {
+        await SendOtpAsync(
+            email,
+            displayName,
+            "Verify your Fakebook account",
+            BuildVerificationBody(displayName, otp),
+            cancellationToken);
+    }
+
+    public async Task SendPasswordResetOtpAsync(
+        string email,
+        string displayName,
+        string otp,
+        CancellationToken cancellationToken)
+    {
+        await SendOtpAsync(
+            email,
+            displayName,
+            "Reset your Fakebook password",
+            BuildPasswordResetBody(displayName, otp),
+            cancellationToken);
+    }
+
+    private async Task SendOtpAsync(
+        string email,
+        string displayName,
+        string subject,
+        string body,
+        CancellationToken cancellationToken)
+    {
         if (!_options.Enabled)
         {
             return;
@@ -33,8 +68,8 @@ public sealed class SmtpEmailSender(IOptions<SmtpOptions> options) : IEmailSende
         using var message = new MailMessage
         {
             From = new MailAddress(_options.FromEmail, _options.FromName),
-            Subject = "Verify your Fakebook account",
-            Body = BuildVerificationBody(displayName, otp),
+            Subject = subject,
+            Body = body,
             IsBodyHtml = false
         };
 
@@ -59,6 +94,19 @@ public sealed class SmtpEmailSender(IOptions<SmtpOptions> options) : IEmailSende
         {otp}
 
         This code expires in 15 minutes. If you did not create a Fakebook account, you can ignore this email.
+
+        Fakebook
+        """;
+
+    private static string BuildPasswordResetBody(string displayName, string otp) =>
+        $"""
+        Hi {displayName},
+
+        Your Fakebook password reset code is:
+
+        {otp}
+
+        This code expires in 15 minutes. If you did not request a password reset, you can ignore this email.
 
         Fakebook
         """;

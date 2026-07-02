@@ -35,6 +35,9 @@ public static class Program
             .AddOptions<AuthOptions>()
             .Bind(builder.Configuration.GetSection(AuthOptions.SectionName))
             .Validate(options => options.RefreshTokenDays > 0, "Auth:RefreshTokenDays must be greater than zero.")
+            .Validate(options => options.EmailVerificationMinutes > 0, "Auth:EmailVerificationMinutes must be greater than zero.")
+            .Validate(options => options.PasswordResetMinutes > 0, "Auth:PasswordResetMinutes must be greater than zero.")
+            .Validate(options => options.OtpCooldownSeconds >= 0, "Auth:OtpCooldownSeconds must be greater than or equal to zero.")
             .ValidateOnStart();
 
         builder.Services
@@ -66,6 +69,7 @@ public static class Program
 
         builder.Services
             .AddGraphQLServer()
+            .ModifyRequestOptions(options => options.IncludeExceptionDetails = builder.Environment.IsDevelopment())
             .AddQueryType<Query>()
             .AddMutationType<AuthMutations>()
             .AddType<DateType>();

@@ -32,16 +32,19 @@ public sealed class BCryptPasswordHasher : IPasswordHasher
 
 public interface ITokenService
 {
-    string CreateAccessToken(IdentityUser user);
+    string CreateAccessToken(IdentityUser user, long? sessionId = null);
     string CreateRefreshToken();
+    bool TryValidateAccessToken(string token, out AccessTokenPrincipal? principal);
 }
+
+public sealed record AccessTokenPrincipal(long UserId, long? SessionId);
 
 public sealed class TokenService(IOptions<JwtOptions> options) : ITokenService
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private readonly JwtOptions _options = options.Value;
 
-    public string CreateAccessToken(IdentityUser user)
+    public string CreateAccessToken(IdentityUser user, long? sessionId = null)
     {
         var now = DateTimeOffset.UtcNow;
         var expiresAt = now.AddMinutes(_options.AccessTokenMinutes);
@@ -66,6 +69,11 @@ public sealed class TokenService(IOptions<JwtOptions> options) : ITokenService
             ["jti"] = Guid.NewGuid().ToString("N")
         };
 
+        if (sessionId is not null)
+        {
+            payload["sid"] = sessionId.Value;
+        }
+
         var unsignedToken = $"{EncodeJson(header)}.{EncodeJson(payload)}";
         var signature = Sign(unsignedToken, _options.SigningKey);
 
@@ -76,6 +84,82 @@ public sealed class TokenService(IOptions<JwtOptions> options) : ITokenService
     {
         var bytes = RandomNumberGenerator.GetBytes(64);
         return WebEncoders.Base64UrlEncode(bytes);
+    }
+
+    public bool TryValidateAccessToken(string token, out AccessTokenPrincipal? principal)
+    {
+        principal = null;
+
+        try
+        {
+            var parts = token.Split('.');
+            if (parts.Length != 3)
+            {
+                return false;
+            }
+
+            var unsignedToken = $"{parts[0]}.{parts[1]}";
+            var expectedSignature = Sign(unsignedToken, _options.SigningKey);
+            var expectedBytes = Encoding.ASCII.GetBytes(expectedSignature);
+            var actualBytes = Encoding.ASCII.GetBytes(parts[2]);
+
+            if (expectedBytes.Length != actualBytes.Length ||
+                !CryptographicOperations.FixedTimeEquals(expectedBytes, actualBytes))
+            {
+                return false;
+            }
+
+            using var header = JsonDocument.Parse(WebEncoders.Base64UrlDecode(parts[0]));
+            if (!header.RootElement.TryGetProperty("alg", out var alg) ||
+                alg.GetString() != "HS256")
+            {
+                return false;
+            }
+
+            using var payload = JsonDocument.Parse(WebEncoders.Base64UrlDecode(parts[1]));
+            var root = payload.RootElement;
+
+            if (!root.TryGetProperty("iss", out var issuer) ||
+                issuer.GetString() != _options.Issuer ||
+                !root.TryGetProperty("aud", out var audience) ||
+                audience.GetString() != _options.Audience)
+            {
+                return false;
+            }
+
+            var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+            if (!root.TryGetProperty("exp", out var expiresAt) ||
+                expiresAt.GetInt64() <= now)
+            {
+                return false;
+            }
+
+            if (root.TryGetProperty("nbf", out var notBefore) &&
+                notBefore.GetInt64() > now)
+            {
+                return false;
+            }
+
+            if (!root.TryGetProperty("user_id", out var userIdElement) ||
+                !userIdElement.TryGetInt64(out var userId))
+            {
+                return false;
+            }
+
+            long? sessionId = null;
+            if (root.TryGetProperty("sid", out var sessionElement) &&
+                sessionElement.TryGetInt64(out var parsedSessionId))
+            {
+                sessionId = parsedSessionId;
+            }
+
+            principal = new AccessTokenPrincipal(userId, sessionId);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private static string EncodeJson(object value)

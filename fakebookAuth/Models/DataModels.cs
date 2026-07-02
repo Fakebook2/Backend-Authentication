@@ -6,6 +6,7 @@ public static class AuthConstants
 {
     public const short PasswordProvider = 1;
     public const short EmailVerificationType = 1;
+    public const short PasswordResetVerificationType = 3;
 
     public const short StatusActive = 1;
     public const short StatusDisabled = 2;
@@ -26,6 +27,32 @@ public sealed class IdentityUser
     public DateTimeOffset UpdatedAt { get; set; }
 
     public UserType ToGraphQl() => new(UserId, Email, Username, Dob, DisplayName, Status);
+}
+
+public sealed class UserSession
+{
+    public long SessionId { get; set; }
+    public long UserId { get; set; }
+    public string RefreshTokenHash { get; set; } = string.Empty;
+    public string? DeviceName { get; set; }
+    public string? Os { get; set; }
+    public string? Browser { get; set; }
+    public IPAddress? IpAddress { get; set; }
+    public DateTimeOffset ExpiresAt { get; set; }
+    public DateTimeOffset CreatedAt { get; set; }
+    public DateTimeOffset? RevokedAt { get; set; }
+
+    public SessionType ToGraphQl(long? currentSessionId) =>
+        new(
+            SessionId,
+            DeviceName,
+            Os,
+            Browser,
+            IpAddress?.ToString(),
+            ExpiresAt,
+            CreatedAt,
+            RevokedAt,
+            currentSessionId == SessionId);
 }
 
 public sealed class UserCredential

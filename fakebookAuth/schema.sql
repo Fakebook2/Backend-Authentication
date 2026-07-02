@@ -31,7 +31,7 @@ CREATE TABLE id_credential (
 CREATE TABLE id_session (
                             session_id       bigint PRIMARY KEY,
                             user_id          bigint NOT NULL REFERENCES id_user(user_id) ON DELETE CASCADE,
-                            refresh_token    text NOT NULL,
+                            refresh_token    text NOT NULL, -- Stores SHA-256 hash of the refresh token, not the raw token
                             device_name      text,          -- VD: 'iPhone 15 Pro Max'
                             os               text,          -- VD: 'iOS 17'
                             browser          text,          -- VD: 'Safari'

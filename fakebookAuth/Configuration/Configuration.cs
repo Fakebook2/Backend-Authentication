@@ -19,6 +19,9 @@ public sealed class AuthOptions
     public const string SectionName = "Auth";
 
     public int RefreshTokenDays { get; init; } = 30;
+    public int EmailVerificationMinutes { get; init; } = 15;
+    public int PasswordResetMinutes { get; init; } = 15;
+    public int OtpCooldownSeconds { get; init; } = 60;
 }
 
 public sealed class SmtpOptions
